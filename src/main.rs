@@ -34,6 +34,10 @@ struct Args {
     /// enable update barrier
     #[argh(switch, short = 'u')]
     update_barrier: bool,
+
+    /// maximum amount of time in seconds to wait for a repository to be cloned, default: 10
+    #[argh(option, default = "10")]
+    clone_timeout: u32,
 }
 
 static UPDATE_BARRIER: AtomicU64 = AtomicU64::new(0);
@@ -83,7 +87,12 @@ async fn async_main(args: Args) -> io::Result<()> {
                 } else {
                     None
                 };
-                smol::spawn(handle_client(stream, maybe_update_barrier)).detach();
+                smol::spawn(handle_client(
+                    stream,
+                    maybe_update_barrier,
+                    args.clone_timeout,
+                ))
+                .detach();
             }
             Err(e) => {
                 warn!("accepting connection failed: {e}");
@@ -120,6 +129,7 @@ fn git_cache_dir_set(git_cache_dir_arg: Option<String>) {
 async fn handle_client(
     mut stream: TcpStream,
     mut update_barrier: Option<UpdateBarrier>,
+    clone_timeout: u32,
 ) -> std::io::Result<()> {
     let client = stream.peer_addr().unwrap();
 
@@ -135,7 +145,7 @@ async fn handle_client(
 
     if update_barrier_check(update_barrier.as_ref(), &url) {
         info!("updating {url}");
-        prefetch(&url).await?;
+        prefetch(&url, clone_timeout).await?;
         update_barrier_update(update_barrier.as_mut().as_deref(), url);
     } else {
         info!("{url} was updated since update barrier, skipping update");
@@ -164,7 +174,7 @@ fn update_barrier_update(update_barrier: Option<&UpdateBarrier>, url: String) {
     }
 }
 
-async fn prefetch(url: &str) -> Result<(), Error> {
+async fn prefetch(url: &str, clone_timeout: u32) -> Result<(), Error> {
     let mut command = Command::new("git")
         .env(
             "GIT_CONFIG_GLOBAL",
@@ -174,7 +184,7 @@ async fn prefetch(url: &str) -> Result<(), Error> {
         .args(["cache", "prefetch", "-U", url])
         .spawn()?;
 
-    for _ in 0..100 {
+    for _ in 0..clone_timeout * 10 {
         if command.try_wait()?.is_some() {
             trace!("child reaped");
             break;
